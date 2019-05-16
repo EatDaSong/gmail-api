@@ -152,7 +152,9 @@ function getInterlocuteurs($message) {
             $to = $header->value;
         }
     }
-    
+    if(!isset($to)) {
+        $to = "Pas séléctionné";
+    }
     return array('from' => cleanEmail($from), 'to' => cleanEmail($to));
 }
 
