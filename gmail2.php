@@ -9,28 +9,35 @@ require __DIR__ . '/vendor/autoload.php';
 $search = "";
 $utilisateur = 19;
 $dbh = new PDO('mysql:host=localhost;dbname=crm-simplon-02', "root", "");
+
 //
 //FIN CONFIG DE TEST
-
 //Fonctions
+//Aussi simple que possible
 function decodeBody($body) {
-    $rawData = $body;
-    $sanitizedData = strtr($rawData, '-_', '+/');
-    $decodedMessage = base64_decode($sanitizedData);
+    $decodedMessage = base64_decode(cleanBase64($body));
     if (!$decodedMessage) {
         $decodedMessage = FALSE;
     }
     return $decodedMessage;
 }
 
-function getLabels($service)    {
+function cleanBase64($base64) {
+    $sanitizeData = strtr($base64, '-', '+');
+    $sanitizeData = strtr($sanitizeData, '_', '/');
+    return $sanitizeData;
+}
+
+//On récup les labels IDS et leurs correspondance afin de retourner un tableau
+function getLabels($service) {
     $labels = array();
-    foreach($service->users_labels->listUsersLabels('me')->labels as $label)    {
+    foreach ($service->users_labels->listUsersLabels('me')->labels as $label) {
         $labels = array_merge($labels, array($label->id => $label->name));
     }
     return $labels;
 }
 
+//Fonction récursive qui s'appel jusqu'à ne plus avoir de "nextPageToken" affin de construire le tableau des messagesIds
 function getMessages($service, $search, $label, $nextPageToken = null, $arrayMessagesIds = []) {
     if ($nextPageToken != null)
         $messages = $service->users_messages->listUsersMessages('me', ['pageToken' => $nextPageToken]);
@@ -58,11 +65,9 @@ function getBodyMessage($elem) {
                 $FOUND_BODY = decodeBody($part['body']->data);
                 break;
             }
-            // Last try: if we didn't find the body in the first parts, 
-            // let's loop into the parts of the parts (as @Tholle suggested).
+            //Si on ne trouve pas le body on boucle dans les parties des parties
             if ($part['parts'] && !$FOUND_BODY) {
                 foreach ($part['parts'] as $p) {
-                    // replace 'text/html' by 'text/plain' if you prefer
                     if ($p['mimeType'] === 'text/html' && $p['body']) {
                         $FOUND_BODY = decodeBody($p['body']->data);
                         break;
@@ -77,6 +82,7 @@ function getBodyMessage($elem) {
     return $FOUND_BODY;
 }
 
+//On récupère le sujet, optimisable car ne trouve pas le sujet à tous les coups. s'inspirer de getBody?
 function getSubjectMessage($message) {
     foreach ($message->payload->headers as $header) {
         if ($header->name == "Subject") {
@@ -84,41 +90,82 @@ function getSubjectMessage($message) {
             break;
         }
     }
-    if(isset($subject) && !empty($subject)) {
+    if (isset($subject) && !empty($subject)) {
         return $subject;
-    }   else   {
+    } else {
         return "Pas de sujet";
     }
 }
 
+function getPjMessage($message) {
+    //$arrayPj = array();
+    $stringPj = "";
+    foreach ($message->payload->parts as $part) {
+        if (isset($part->body->attachmentId)) {
+            $stringPj .= "{" . $part->filename . "}";
+            //Récuperation de pièces jointe à terminer
+            /* var_dump($part);
+              $attachment = $service->users_messages_attachments->get('me', $message->id, $part->body->attachmentId);
+              var_dump($attachment);
+              array_push($arrayPj, $attachment['data']);
+              echo '<audio controls src="data:audio/x-wav;base64,'. cleanBase64($attachment['data']).'" />';
+              $test = fopen('test.txt', 'w+');
+              fwrite($test, decodeBody($attachment['data']));
+              fclose($test); */
+        }
+    }
+    return $stringPj;
+}
+
+//Mise en base de donnée des nouveaux mails
 function updateMailBdd($dbh, $service, $utilisateur, $messagesIds = array()) {
+    //Récupération des IDs déjà en BDD
     $verifRqt = $dbh->query('SELECT messageId from mails WHERE utilisateur = ' . $utilisateur); //Prochainement email_proprietaire
     $arrayMessageIdTable = $verifRqt->fetchAll(PDO::FETCH_COLUMN, 0);
+
+    //Récupération email propriétaire
+    $proprietaire = $service->users->getProfile('me')->emailAddress;
+
+    //Récupération des labels
     $labels = getLabels($service);
+
+    //Boucle sur les messagesIds fourni par l'api gmail
     foreach ($messagesIds as $messageId) {
         if (!in_array($messageId->id, $arrayMessageIdTable)) {
+            //Get message
             $message = $service->users_messages->get('me', $messageId->id, ['format' => 'full']);
+            var_dump($message->payload);
+            //Construction des labels
             $stringLabels = "";
-            foreach($message->labelIds as $label)   {
-                $stringLabels .= '{'. $labels[$label] .'}';
+            foreach ($message->labelIds as $label) {
+                $stringLabels .= '{' . $labels[$label] . '}';
             }
-            //$query = $dbh->query('INSERT INTO `mails`(`messageId`, `label`, `etat`, `infos`, `email`, `date`, `utilisateur`, `sujet`, `contenu`, `pj`, `threadId`) VALUES ("'.$message->id.'","'.$stringLabels.'","","","","2019-01-01 00:00:00",'.$utilisateur.',"'.getSubjectMessage($message).'","'.getBodyMessage($message).'","","'.$message->threadId.'")');
-            $prepare = $dbh->prepare('INSERT INTO `mails` (`messageId`, `label`, `date`, `utilisateur`, `sujet`, `contenu`, `threadId`) VALUES (:messageId, :label, :date, :utilisateur, :sujet, :contenu, :threadId)');
+            //Récupération email interlocuteur et état
+            
+            
+            //Insertion en bdd
+            $prepare = $dbh->prepare('INSERT INTO `mails` (`messageId`, `label`, `proprietaire`, `date`, `utilisateur`, `sujet`, `contenu`, `pj,` `threadId`) VALUES (:messageId, :label, :proprietaire, :date, :utilisateur, :sujet, :contenu, :pj, :threadId)');
             $data = [
                 'messageId' => $message->id,
                 'label' => $stringLabels,
+                'proprietaire' => $proprietaire,
                 'date' => "2019-01-01 00:00:00",
                 'utilisateur' => $utilisateur,
                 'sujet' => getSubjectMessage($message),
                 'contenu' => getBodyMessage($message),
+                'pj' => getPjMessage($message),
                 'threadId' => $message->threadId
             ];
             $prepare->execute($data);
-            if(!$prepare) {
+
+            //Verification d'érreur
+            if (!$prepare) {
                 var_dump($dbh->errorInfo());
-            }   else    {
+            } else {
+                //Log
                 echo "Enregistrement " . $messageId->id . "</br>";
             }
+            break;
         }
     }
 }
@@ -126,11 +173,10 @@ function updateMailBdd($dbh, $service, $utilisateur, $messagesIds = array()) {
 $client = new Google_Client();
 
 /* CONFIG, FUTUR CONSTRUCTOR */
-$client->setClientId('61902259420-fkgarj0kkn5l254ggl9jfl3jqn9i1s0p.apps.googleusercontent.com'); //OAuth
-$client->setClientSecret('7RrYBuup1ejAoB9g3cDGIoXO'); //OAuth
-$client->setRedirectUri('http://localhost/sserenity/gmail2.php'); //Redirection ?
+$client->setClientId('131904409282-8e87rpp0jgrb34astci17v4n7pocehrd.apps.googleusercontent.com'); //OAuth
+$client->setClientSecret('KjXIqzM4Fm5g2_zFgcK-c0rq'); //OAuth
+$client->setRedirectUri('http://localhost/gmail-api/gmail2.php'); //Redirection ?
 $client->addScope('https://mail.google.com/'); //SCOPE, mail.google.com pour accès total au compte cf https://developers.google.com/gmail/api/auth/scopes
-
 //Création services gmail
 $service = new Google_Service_Gmail($client);
 
@@ -158,7 +204,7 @@ if (isset($_SESSION['access_token'])) {
 //Vérification si nous avons un access_token près pour l'appel d'api
 try {
     if (isset($_SESSION['access_token']) && $client->getAccessToken()) {
-        updateMailBdd($dbh, $service, $utilisateur, getMessages($service, $search, "INBOX"));
+        updateMailBdd($dbh, $service, $utilisateur, getMessages($service, $search, array('INBOX')));
     }
 } catch (Google_Auth_Exception $e) {
     echo $e;
