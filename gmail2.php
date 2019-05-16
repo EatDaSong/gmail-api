@@ -9,6 +9,7 @@ require __DIR__ . '/vendor/autoload.php';
 $search = "";
 $utilisateur = 19;
 $dbh = new PDO('mysql:host=localhost;dbname=crm-simplon-02', "root", "");
+$dbh -> exec("SET CHARACTER SET utf8");
 
 //
 //FIN CONFIG DE TEST
@@ -117,6 +118,53 @@ function getPjMessage($message) {
     return $stringPj;
 }
 
+//Récupération état
+function getEtatMessage($message) {
+    foreach ($message->payload->headers as $header) {
+        if ($header->name == "Delivered-To") {
+            $etat = "reçu";
+        }
+    }
+    if(!isset($etat))   {
+        $etat = "envoyé";
+    }
+    return $etat;
+}
+
+//Obtention de la date
+function getDateMessage($message)   {
+    foreach($message->payload->headers as $header) {
+        if($header->name == "Date") {
+            $date = date('Y-m-d H:i:s', strtotime($header->value));
+            break;
+        }
+    }
+    return $date;
+}
+
+//Récupération interlocuteur
+function getInterlocuteurs($message) {
+    foreach ($message->payload->headers as $header) {
+        if ($header->name == "From") {
+            $from = $header->value;
+        }
+        if ($header->name == "To") {
+            $to = $header->value;
+        }
+    }
+    
+    return array('from' => cleanEmail($from), 'to' => cleanEmail($to));
+}
+
+//On ne garde que l'email
+function cleanEmail($interlocuteur) {
+    if (strpos($interlocuteur, '<') != false && strpos($interlocuteur, '>') != false) {
+        $interlocuteur = substr($interlocuteur, strpos($interlocuteur, '<') + 1, strpos($interlocuteur, '>') - strlen($interlocuteur));
+    }
+    
+    return $interlocuteur;
+}
+
 //Mise en base de donnée des nouveaux mails
 function updateMailBdd($dbh, $service, $utilisateur, $messagesIds = array()) {
     //Récupération des IDs déjà en BDD
@@ -134,22 +182,26 @@ function updateMailBdd($dbh, $service, $utilisateur, $messagesIds = array()) {
         if (!in_array($messageId->id, $arrayMessageIdTable)) {
             //Get message
             $message = $service->users_messages->get('me', $messageId->id, ['format' => 'full']);
-            var_dump($message->payload);
+
             //Construction des labels
             $stringLabels = "";
             foreach ($message->labelIds as $label) {
                 $stringLabels .= '{' . $labels[$label] . '}';
             }
-            //Récupération email interlocuteur et état
+
+            //récup état pour interlocuteur et insertion
+            $interlocuteurs = getInterlocuteurs($message);
             
-            
-            //Insertion en bdd
-            $prepare = $dbh->prepare('INSERT INTO `mails` (`messageId`, `label`, `proprietaire`, `date`, `utilisateur`, `sujet`, `contenu`, `pj,` `threadId`) VALUES (:messageId, :label, :proprietaire, :date, :utilisateur, :sujet, :contenu, :pj, :threadId)');
+            //Insertion en bdd        
+            $prepare = $dbh->prepare('INSERT INTO `mails` (`messageId`, `label`, `etat`, `proprietaire`, `from`, `to`, `date`, `utilisateur`, `sujet`, `contenu`, `pj`, `threadId`) VALUES (:messageId, :label, :etat, :proprietaire, :from, :to, :date, :utilisateur, :sujet, :contenu, :pj, :threadId)');
             $data = [
                 'messageId' => $message->id,
                 'label' => $stringLabels,
+                'etat' => getEtatMessage($message),
                 'proprietaire' => $proprietaire,
-                'date' => "2019-01-01 00:00:00",
+                'from' => $interlocuteurs['from'],
+                'to' => $interlocuteurs['to'],
+                'date' => getDateMessage($message),
                 'utilisateur' => $utilisateur,
                 'sujet' => getSubjectMessage($message),
                 'contenu' => getBodyMessage($message),
@@ -165,7 +217,7 @@ function updateMailBdd($dbh, $service, $utilisateur, $messagesIds = array()) {
                 //Log
                 echo "Enregistrement " . $messageId->id . "</br>";
             }
-            break;
+            //break;
         }
     }
 }
@@ -204,7 +256,7 @@ if (isset($_SESSION['access_token'])) {
 //Vérification si nous avons un access_token près pour l'appel d'api
 try {
     if (isset($_SESSION['access_token']) && $client->getAccessToken()) {
-        updateMailBdd($dbh, $service, $utilisateur, getMessages($service, $search, array('INBOX')));
+        updateMailBdd($dbh, $service, $utilisateur, getMessages($service, $search, array()));
     }
 } catch (Google_Auth_Exception $e) {
     echo $e;
